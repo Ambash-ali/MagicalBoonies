@@ -57,12 +57,12 @@ export async function getDestinations() {
   return { data, error };
 }
 
-export async function getDestinationBySlug(slug: string) {
+export async function getDestinationByName(name: string) {
   const { data, error } = await supabase
     .from('destinations')
     .select('*')
-    .eq('slug', slug)
-    .single();
+    .eq('name', name) // Assuming 'name' is unique
+    .single();  
   
   return { data, error };
 }
@@ -176,6 +176,7 @@ export async function debugFetch() {
   
   console.log('Status:', response.status);
   console.log('Headers:', Object.fromEntries([...response.headers]));
+  
   const data = await response.json().catch(e => console.error('JSON parse error:', e));
   console.log('Data:', data);
 }
