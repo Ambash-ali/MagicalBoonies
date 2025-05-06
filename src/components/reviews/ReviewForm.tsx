@@ -25,6 +25,36 @@ const ReviewForm: React.FC<ReviewFormProps> = ({ packageId, onSuccess }) => {
   const [recaptchaToken, setRecaptchaToken] = useState<string | null>(null);
   const [existingReview, setExistingReview] = useState<Review | null>(null);
   const recaptchaRef = useRef<ReCAPTCHA>(null);
+  const recaptchaSiteKey = import.meta.env.VITE_RECAPTCHA_SITE_KEY || '';
+
+  // Show error if recaptcha site key is missing
+  useEffect(() => {
+    if (!recaptchaSiteKey) {
+      console.error('Missing reCAPTCHA site key. Set VITE_RECAPTCHA_SITE_KEY in your environment.');
+    }
+  }, [recaptchaSiteKey]);
+
+  // Verify package exists in safari_packages
+  useEffect(() => {
+    const verifyPackage = async () => {
+      try {
+        const { data, error } = await supabase
+          .from('safari_packages')
+          .select('id')
+          .eq('id', packageId)
+          .single();
+          
+        if (error) {
+          console.error('Package verification error:', error);
+          toast.error('Unable to verify safari package');
+        }
+      } catch (err) {
+        console.error('Error verifying safari package:', err);
+      }
+    };
+    
+    verifyPackage();
+  }, [packageId]);
 
   useEffect(() => {
     if (user) {
@@ -35,22 +65,31 @@ const ReviewForm: React.FC<ReviewFormProps> = ({ packageId, onSuccess }) => {
       }));
 
       const fetchExistingReview = async () => {
-        const { data, error } = await supabase
-          .from('reviews')
-          .select('*')
-          .eq('package_id', packageId)
-          .eq('user_id', user.id)
-          .single();
+        try {
+          const { data, error } = await supabase
+            .from('reviews')
+            .select('*')
+            .eq('package_id', packageId)
+            .eq('user_id', user.id)
+            .single();
 
-        if (data) {
-          setExistingReview(data);
-          setFormData({
-            name: data.name,
-            email: data.email,
-            rating: data.rating,
-            title: data.title,
-            comment: data.comment
-          });
+          if (error && error.code !== 'PGRST116') { // PGRST116 is "no rows returned" error
+            throw error;
+          }
+
+          if (data) {
+            setExistingReview(data);
+            setFormData({
+              name: data.name,
+              email: data.email,
+              rating: data.rating,
+              title: data.title,
+              comment: data.comment
+            });
+          }
+        } catch (error) {
+          console.error('Error fetching existing review:', error);
+          toast.error('Failed to check for your existing review');
         }
       };
 
@@ -74,40 +113,62 @@ const ReviewForm: React.FC<ReviewFormProps> = ({ packageId, onSuccess }) => {
     setIsSubmitting(true);
 
     try {
+      // Verify package exists in safari_packages before proceeding
+      const { data: packageData, error: packageError } = await supabase
+        .from('safari_packages')
+        .select('id')
+        .eq('id', packageId)
+        .single();
+        
+      if (packageError) {
+        throw new Error('Invalid safari package or package not found');
+      }
+
+      const now = new Date().toISOString();
       const reviewData = {
         package_id: packageId,
         user_id: user.id,
         ...formData,
         is_approved: false, // New reviews need approval
-        is_verified: false  // Default value
+        is_verified: false,  // Default value
+        submitted_at: existingReview ? existingReview.submitted_at : now, // Keep original submission date for updates
+        updated_at: now // Add update timestamp
       };
 
-      const { error } = existingReview
-        ? await supabase
-            .from('reviews')
-            .update(reviewData)
-            .eq('id', existingReview.id)
-        : await supabase
-            .from('reviews')
-            .insert([reviewData]);
+      let result;
+      if (existingReview) {
+        result = await supabase
+          .from('reviews')
+          .update(reviewData)
+          .eq('id', existingReview.id);
+      } else {
+        result = await supabase
+          .from('reviews')
+          .insert([reviewData]);
+      }
 
-      if (error) throw error;
+      if (result.error) throw result.error;
 
-      toast.success(existingReview 
-        ? 'Review updated successfully!' 
-        : 'Thank you for your review! It will be visible after approval.'
-      );
-      
-      onSuccess?.();
-      
-      if (!existingReview) {
-        setFormData({
-          name: '',
-          email: '',
-          rating: 5,
-          title: '',
-          comment: ''
-        });
+      // Check if operation was successful
+      if (result.status >= 200 && result.status < 300) {
+        toast.success(existingReview 
+          ? 'Review updated successfully!' 
+          : 'Thank you for your review! It will be visible after approval.'
+        );
+        
+        onSuccess?.();
+        
+        if (!existingReview) {
+          setFormData({
+            name: user.firstName ? `${user.firstName} ${user.lastName || ''}`.trim() : '',
+            email: user.email || '',
+            rating: 5,
+            title: '',
+            comment: ''
+          });
+        }
+      } else {
+        throw new Error(`Received status code ${result.status}`);
       }
       
       setRecaptchaToken(null);
@@ -115,12 +176,26 @@ const ReviewForm: React.FC<ReviewFormProps> = ({ packageId, onSuccess }) => {
     } catch (error) {
       console.error('Error submitting review:', error);
       toast.error('Failed to submit review. Please try again.');
-      setRecaptchaToken(null);
-      recaptchaRef.current?.reset();
     } finally {
       setIsSubmitting(false);
     }
   };
+
+  // If not logged in, show login prompt
+  if (!user) {
+    return (
+      <div className="text-center py-8 bg-gray-50 rounded-lg">
+        <h3 className="text-lg font-medium text-gray-900 mb-2">Sign in to leave a review</h3>
+        <p className="text-gray-600 mb-4">Your insights help other travelers make the right choice</p>
+        <Button
+          variant="primary"
+          onClick={() => window.location.href = '/auth/SignIn?redirect=' + encodeURIComponent(window.location.pathname)}
+        >
+          Sign In
+        </Button>
+      </div>
+    );
+  }
 
   return (
     <form onSubmit={handleSubmit} className="space-y-6">
@@ -133,11 +208,13 @@ const ReviewForm: React.FC<ReviewFormProps> = ({ packageId, onSuccess }) => {
             type="text"
             id="name"
             value={formData.name}
-            onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-            className="mt-1 block w-full rounded-md border border-gray-300 shadow-sm p-2"
+            className="mt-1 block w-full rounded-md border border-gray-300 shadow-sm p-2 bg-gray-100"
             required
-            disabled={!!user}
+            disabled={true} // Always disabled as it's set from user profile
+            readOnly
+            aria-readonly="true"
           />
+          <p className="mt-1 text-xs text-gray-500">This is your profile name</p>
         </div>
         
         <div>
@@ -148,11 +225,13 @@ const ReviewForm: React.FC<ReviewFormProps> = ({ packageId, onSuccess }) => {
             type="email"
             id="email"
             value={formData.email}
-            onChange={(e) => setFormData({ ...formData, email: e.target.value })}
-            className="mt-1 block w-full rounded-md border border-gray-300 shadow-sm p-2"
+            className="mt-1 block w-full rounded-md border border-gray-300 shadow-sm p-2 bg-gray-100"
             required
-            disabled={!!user}
+            disabled={true} // Always disabled as it's set from user profile
+            readOnly
+            aria-readonly="true"
           />
+          <p className="mt-1 text-xs text-gray-500">Your email will not be displayed publicly</p>
         </div>
         
         <div>
@@ -168,6 +247,7 @@ const ReviewForm: React.FC<ReviewFormProps> = ({ packageId, onSuccess }) => {
                   i < formData.rating ? 'text-amber-400 fill-amber-400' : 'text-gray-300'
                 }`}
                 onClick={() => setFormData({ ...formData, rating: i + 1 })}
+                aria-label={`Rate ${i + 1} out of 5 stars`}
               />
             ))}
           </div>
@@ -184,6 +264,8 @@ const ReviewForm: React.FC<ReviewFormProps> = ({ packageId, onSuccess }) => {
             onChange={(e) => setFormData({ ...formData, title: e.target.value })}
             className="mt-1 block w-full rounded-md border border-gray-300 shadow-sm p-2"
             required
+            maxLength={100}
+            placeholder="Summarize your experience"
           />
         </div>
         
@@ -197,31 +279,37 @@ const ReviewForm: React.FC<ReviewFormProps> = ({ packageId, onSuccess }) => {
             onChange={(e) => setFormData({ ...formData, comment: e.target.value })}
             className="mt-1 block w-full rounded-md border border-gray-300 shadow-sm p-2 h-32"
             required
+            maxLength={2000}
+            placeholder="Share your experience to help other travelers"
           />
         </div>
       </div>
       
-      <div>
-        <ReCAPTCHA
-          ref={recaptchaRef}
-          sitekey={import.meta.env.VITE_RECAPTCHA_SITE_KEY}
-          onChange={(token) => setRecaptchaToken(token)}
-          onExpired={() => {
-            setRecaptchaToken(null);
-            toast.error('reCAPTCHA verification expired. Please complete it again.');
-          }}
-        />
-      </div>
+      {recaptchaSiteKey && (
+        <div>
+          <ReCAPTCHA
+            ref={recaptchaRef}
+            sitekey={recaptchaSiteKey}
+            onChange={(token) => setRecaptchaToken(token)}
+            onExpired={() => {
+              setRecaptchaToken(null);
+              toast.error('reCAPTCHA verification expired. Please complete it again.');
+            }}
+          />
+        </div>
+      )}
 
       <Button
         type="submit"
         variant="primary"
         isLoading={isSubmitting}
         fullWidth
+        disabled={!recaptchaSiteKey}
       >
         {existingReview ? 'Update Review' : 'Submit Review'}
       </Button>
     </form>
   );
 };
+
 export default ReviewForm;
